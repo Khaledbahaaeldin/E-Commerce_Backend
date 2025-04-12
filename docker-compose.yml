@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  auth-service:
+    build: ./auth-service
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      JWT_SECRET: "your-secret-key"
+      OAUTH_CLIENT_ID: "your-client-id"
+      OAUTH_CLIENT_SECRET: "your-client-secret"
+
+  product-service:
+    build: ./product-service
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      MONGO_URI: "mongodb+srv://<username>:<password>@cluster.mongodb.net/products"  # Replace with your MongoDB Atlas URI
+
+  order-service:
+    build: ./order-service
+    ports:
+      - "3002:3002"
+    environment:
+      PORT: 3002
+      PAYMOB_API_KEY: "your-paymob-key"
