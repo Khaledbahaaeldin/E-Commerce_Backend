@@ -1,5 +1,3 @@
-# E-Commerce_Backend
- Backend Repo for the Distributed Information Systems Project (CSE474)
 # E-Commerce Microservices Backend
 
 A robust, scalable microservices-based e-commerce backend platform built with Node.js, Express, MongoDB, Docker, and Kubernetes.
