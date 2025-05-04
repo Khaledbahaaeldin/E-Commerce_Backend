@@ -17,6 +17,8 @@ services:
     volumes:
       - ./auth-service:/app
       - /app/node_modules
+    networks:
+      - ecommerce-network
 
   product-service:
     build: ./product-service
@@ -25,9 +27,14 @@ services:
     environment:
       PORT: 4000
       MONGO_URI: "mongodb+srv://<username>:<password>@cluster.mongodb.net/products"
+      AUTH_SERVICE_URL: "http://auth-service:3000"
     volumes:
       - ./product-service:/app
       - /app/node_modules
+    depends_on:
+      - auth-service
+    networks:
+      - ecommerce-network
 
   order-service:
     build: ./order-service
@@ -35,8 +42,21 @@ services:
       - "3002:3002"
     environment:
       PORT: 3002
-      PAYMOB_API_KEY: "your-paymob-key"
+      MONGO_URI: "mongodb+srv://<username>:<password>@cluster.mongodb.net/orders"
       AUTH_SERVICE_URL: "http://auth-service:3000"
+      PRODUCT_SERVICE_URL: "http://product-service:4000"
+      PAYMOB_API_KEY: "your-paymob-key"
+      PAYMOB_INTEGRATION_ID: "your-paymob-integration-id"
+      PAYMOB_IFRAME_ID: "your-paymob-iframe-id"
     volumes:
       - ./order-service:/app
       - /app/node_modules
+    depends_on:
+      - auth-service
+      - product-service
+    networks:
+      - ecommerce-network
+
+networks:
+  ecommerce-network:
+    driver: bridge
