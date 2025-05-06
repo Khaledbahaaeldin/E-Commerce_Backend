@@ -1,0 +1,85 @@
+# filepath: kubernetes/payment-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+spec:
+  replicas: 1 # Start with 1, scale as needed
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+      - name: payment-service
+        image: payment-service:latest # Ensure you build and tag this image
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3003
+        env:
+        - name: PORT
+          value: "3003"
+        - name: MONGO_URI
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-secret
+              key: payment-uri # Add this key to secrets.yaml
+        - name: ORDER_SERVICE_URL
+          value: "http://order-service:3002"
+        - name: FRONTEND_URL 
+          value: "http://localhost:3000" # Set your actual frontend URL
+        - name: PAYMOB_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: paymob-secret
+              key: ZXlKaGJHY2lPaUpJVXpVeE1pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SmpiR0Z6Y3lJNklrMWxjbU5vWVc1MElpd2ljSEp2Wm1sc1pWOXdheUk2T1RrM05URXpMQ0p1WVcxbElqb2lNVGN5T0RrNU5UYzJOUzR6TlRVek9TSjkuYU11U08wcWd4cXJtbDlyd2t5aUQyWEwxUFI2T2JzV2FuQl96VWpQLVMzRnlNc1ptOWxkclMwRC1vQnJHczB3Q2JTZGMzWWpvVzJ0S1QzdENjTWFEekE=
+        - name: PAYMOB_INTEGRATION_ID
+          valueFrom:
+            secretKeyRef:
+              name: paymob-secret
+              key: 4840665
+        - name: PAYMOB_IFRAME_ID
+          valueFrom:
+            secretKeyRef:
+              name: paymob-secret
+              key: 870800
+        Add HMAC secret if using
+        - name: PAYMOB_HMAC_SECRET
+        valueFrom:
+           secretKeyRef:
+              name: paymob-secret
+              key: 770BFBC346DA0235DAC3F9EFF29EAFC8 
+        resources:
+          limits:
+            cpu: "0.5"
+            memory: "256Mi" # Usually less resource intensive
+          requests:
+            cpu: "0.2"
+            memory: "128Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3003
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3003
+          initialDelaySeconds: 15
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+spec:
+  selector:
+    app: payment-service
+  ports:
+  - port: 3003
+    targetPort: 3003
+  type: ClusterIP

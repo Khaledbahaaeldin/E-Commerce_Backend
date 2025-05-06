@@ -25,34 +25,35 @@ spec:
           valueFrom:
             secretKeyRef:
               name: mongodb-secret
-              key: auth-uri
+              key: mongodb+srv://test:test@lab10.5yizw4o.mongodb.net/auth
         - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
               name: auth-secret
-              key: jwt-secret
+              key: test
         - name: GOOGLE_CLIENT_ID
           valueFrom:
             secretKeyRef:
               name: oauth-secret
-              key: google-client-id
+              key: 826998097826-s7fo708eiq9bcdluq1s7h5fsnt5e4hfn.apps.googleusercontent.com
         - name: GOOGLE_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
               name: oauth-secret
-              key: google-client-secret
+              key: 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
         - name: FACEBOOK_APP_ID
           valueFrom:
             secretKeyRef:
               name: oauth-secret
-              key: facebook-app-id
+              key: 031806359052103
+
         - name: FACEBOOK_APP_SECRET
           valueFrom:
             secretKeyRef:
               name: oauth-secret
-              key: facebook-app-secret
+              key: 6c2a0d854ee43e753dea9adceb7d8d3e
         - name: FRONTEND_URL
-          value: "http://frontend:3000"
+          value: "http://localhost:3000"
         resources:
           limits:
             cpu: "0.5"

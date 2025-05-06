@@ -1,3 +1,4 @@
+# filepath: docker-compose.yml
 version: '3.8'
 
 services:
@@ -7,16 +8,21 @@ services:
       - "3000:3000"
     environment:
       PORT: 3000
-      MONGO_URI: "mongodb+srv://<username>:<password>@cluster.mongodb.net/auth"
-      JWT_SECRET: "your-secret-key"
-      GOOGLE_CLIENT_ID: "your-google-client-id"
-      GOOGLE_CLIENT_SECRET: "your-google-client-secret"
-      FACEBOOK_APP_ID: "your-facebook-app-id"
-      FACEBOOK_APP_SECRET: "your-facebook-app-secret"
-      FRONTEND_URL: "http://localhost:3000"
+      # MONGO_URI loaded from .env file
+      # JWT_SECRET loaded from .env file
+      # GOOGLE_CLIENT_ID loaded from .env file
+      # GOOGLE_CLIENT_SECRET loaded from .env file
+      # FACEBOOK_APP_ID loaded from .env file
+      # FACEBOOK_APP_SECRET loaded from .env file
+      # FRONTEND_URL loaded from .env file
+    env_file:
+      - ./auth-service/.env
     volumes:
       - ./auth-service:/app
-      - /app/node_modules
+      - /app/node_modules # Prevent host node_modules from overwriting container's
+    dns: # Added DNS
+      - 8.8.8.8 # Google Public DNS
+      - 1.1.1.1 # Cloudflare Public DNS
     networks:
       - ecommerce-network
 
@@ -26,13 +32,20 @@ services:
       - "4000:4000"
     environment:
       PORT: 4000
-      MONGO_URI: "mongodb+srv://<username>:<password>@cluster.mongodb.net/products"
-      AUTH_SERVICE_URL: "http://auth-service:3000"
+      # MONGO_URI loaded from .env file
+      AUTH_SERVICE_URL: "http://auth-service:3000" # Service discovery via Docker network
+      REDIS_URL: "redis://redis:6379" # Service discovery via Docker network
+    env_file:
+      - ./product-service/.env
     volumes:
       - ./product-service:/app
       - /app/node_modules
+    dns: # Added DNS
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       - auth-service
+      - redis # Depends on Redis
     networks:
       - ecommerce-network
 
@@ -42,18 +55,53 @@ services:
       - "3002:3002"
     environment:
       PORT: 3002
-      MONGO_URI: "mongodb+srv://<username>:<password>@cluster.mongodb.net/orders"
+      # MONGO_URI loaded from .env file
       AUTH_SERVICE_URL: "http://auth-service:3000"
       PRODUCT_SERVICE_URL: "http://product-service:4000"
-      PAYMOB_API_KEY: "your-paymob-key"
-      PAYMOB_INTEGRATION_ID: "your-paymob-integration-id"
-      PAYMOB_IFRAME_ID: "your-paymob-iframe-id"
+      PAYMENT_SERVICE_URL: "http://payment-service:3003" # Service discovery
+    env_file:
+      - ./order-service/.env
     volumes:
       - ./order-service:/app
       - /app/node_modules
+    dns: # Added DNS
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       - auth-service
       - product-service
+      - payment-service # Depends on Payment Service
+    networks:
+      - ecommerce-network
+
+  payment-service: # Added Service
+    build: ./payment-service
+    ports:
+      - "3003:3003"
+    environment:
+      PORT: 3003
+      # MONGO_URI loaded from .env file
+      ORDER_SERVICE_URL: "http://order-service:3002" # Service discovery
+      # FRONTEND_URL loaded from .env file
+      # PAYMOB_API_KEY loaded from .env file
+      # PAYMOB_INTEGRATION_ID loaded from .env file
+      # PAYMOB_IFRAME_ID loaded from .env file
+      # PAYMOB_HMAC_SECRET loaded from .env file (optional)
+    env_file:
+      - ./payment-service/.env
+    volumes:
+      - ./payment-service:/app
+      - /app/node_modules
+    dns: # Added DNS
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - ecommerce-network
+
+  redis: # Added Redis Service
+    image: redis:alpine
+    ports:
+      - "6379:6379" # Expose Redis port to host if needed for direct inspection
     networks:
       - ecommerce-network
 

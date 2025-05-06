@@ -1,330 +1,402 @@
+// filepath: /home/khaled/Documents/GitHub/E-Commerce_Backend/order-service/controllers/orderController.js
+// filepath: order-service/controllers/orderController.js
 const Order = require('../models/Order');
 const axios = require('axios');
 
-// Helper function to get product details from product service
-const getProductDetails = async (productId) => {
-  const productServiceUrl = process.env.PRODUCT_SERVICE_URL || 'http://product-service:4000';
-  const response = await axios.get(`${productServiceUrl}/api/products/${productId}`);
-  return response.data;
+// Helper function (assuming it exists or is defined)
+const getProductDetails = async (items) => {
+    const productServiceUrl = process.env.PRODUCT_SERVICE_URL || 'http://product-service:4000';
+    const productIds = items.map(item => item.productId);
+    // In a real scenario, you might want a batch endpoint in product service
+    const productDetails = {};
+    for (const id of productIds) {
+        try {
+            // TODO: Add timeout and retry logic for this internal call
+            const { data } = await axios.get(`${productServiceUrl}/api/products/${id}`);
+            productDetails[id] = data;
+        } catch (error) {
+            console.error(`Failed to fetch product ${id}:`, error.response?.data || error.message);
+            // If a product is essential and cannot be fetched, fail the order creation early
+            throw new Error(`Product with ID ${id} not found or product service unavailable.`);
+        }
+    }
+    return productDetails;
 };
+
 
 // @desc    Create a new order
 // @route   POST /api/orders
 // @access  Private
-exports.createOrder = async (req, res) => {
+const createOrder = async (req, res) => {
   try {
     const { 
       items, 
       shipping, 
-      paymentMethod 
+      paymentMethod // e.g., 'credit_card', 'cod'
     } = req.body;
 
-    // Validate required fields
     if (!items || items.length === 0) {
       return res.status(400).json({ message: 'No order items' });
     }
     if (!shipping) {
-      return res.status(400).json({ message: 'Shipping info is required' });
+        return res.status(400).json({ message: 'Shipping address is required' });
+    }
+    if (!paymentMethod) {
+        return res.status(400).json({ message: 'Payment method is required' });
     }
 
-    // Fetch product details from product service and calculate prices
+    // Fetch product details and check stock (optional here, better check before payment)
+    const productDetailsMap = await getProductDetails(items);
+
     let itemsPrice = 0;
-    const orderItems = [];
+    const orderItems = items.map(item => {
+        const productDetails = productDetailsMap[item.productId];
+        if (!productDetails) {
+            // This case should be handled by getProductDetails throwing an error
+            throw new Error(`Product details could not be retrieved for ID ${item.productId}`); 
+        }
+        // Optional: Check stock here if needed, though better done before payment confirmation
+        // if (productDetails.stockQuantity < item.quantity) {
+        //     throw new Error(`Not enough stock for product ${productDetails.name}`);
+        // }
+        const itemTotalPrice = productDetails.price * item.quantity;
+        itemsPrice += itemTotalPrice;
+        return {
+            productId: item.productId,
+            name: productDetails.name,
+            quantity: item.quantity,
+            price: productDetails.price,
+            image: productDetails.images?.[0] || '/uploads/sample.jpg' // Use first image or default
+        };
+    });
 
-    for (const item of items) {
-      const product = await getProductDetails(item.productId);
-      
-      // Check if product exists and has enough stock
-      if (!product) {
-        return res.status(404).json({ message: `Product not found: ${item.productId}` });
-      }
-      if (product.stockQuantity < item.quantity) {
-        return res.status(400).json({ message: `Not enough stock for ${product.name}` });
-      }
-      
-      // Calculate price and add to order items
-      const itemPrice = product.price * item.quantity;
-      itemsPrice += itemPrice;
-      
-      orderItems.push({
-        productId: item.productId,
-        name: product.name,
-        quantity: item.quantity,
-        price: product.price,
-        image: product.images && product.images.length > 0 ? product.images[0] : ''
-      });
-    }
-
-    // Calculate additional costs
-    const shippingPrice = itemsPrice > 100 ? 0 : 10; // Free shipping over $100
-    const taxPrice = Number((0.15 * itemsPrice).toFixed(2)); // 15% tax
+    // Calculate prices (simple example)
+    const shippingPrice = itemsPrice > 100 ? 0 : 10; // Example logic
+    const taxPrice = Number((0.15 * itemsPrice).toFixed(2)); // Example 15% tax
     const totalPrice = itemsPrice + shippingPrice + taxPrice;
 
-    // Create order
+    // Create order with 'pending' status initially
     const order = await Order.create({
-      userId: req.user._id,
+      userId: req.user._id, // Assuming protect middleware adds user info
       items: orderItems,
       shipping,
       paymentMethod,
-      itemsPrice,
-      shippingPrice,
-      taxPrice,
-      totalPrice
+      itemsPrice: Number(itemsPrice.toFixed(2)),
+      shippingPrice: Number(shippingPrice.toFixed(2)),
+      taxPrice: Number(taxPrice.toFixed(2)),
+      totalPrice: Number(totalPrice.toFixed(2)),
+      status: 'pending' // Initial status
     });
-
-    // Update product stock
-    for (const item of items) {
-      const product = await getProductDetails(item.productId);
-      await axios.patch(`${process.env.PRODUCT_SERVICE_URL}/api/products/${item.productId}/stock`, {
-        quantity: product.stockQuantity - item.quantity
-      }, {
-        headers: { Authorization: req.headers.authorization }
-      });
-    }
 
     res.status(201).json(order);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error', error: error.message });
+    console.error('Create Order Error:', error);
+    // Provide more specific error messages if possible
+    if (error.message.includes('Product with ID')) {
+         res.status(400).json({ message: error.message }); // Bad request if product invalid
+    } else {
+         res.status(500).json({ message: 'Server Error creating order', error: error.message });
+    }
   }
 };
 
-// @desc    Get all orders
+// @desc    Initiate payment for an existing order
+// @route   POST /api/orders/:id/initiate-payment
+// @access  Private
+const initiatePayment = async (req, res) => {
+    try {
+        const order = await Order.findById(req.params.id).populate('userId', 'name email'); // Populate user for billing data
+
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Check ownership
+        if (order.userId._id.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Not authorized for this order' });
+        }
+
+        if (order.isPaid) {
+            return res.status(400).json({ message: 'Order is already paid' });
+        }
+         if (order.status === 'cancelled' || order.status === 'payment_failed' || order.status === 'payment_received_stock_error') {
+            return res.status(400).json({ message: `Cannot initiate payment for order with status: ${order.status}` });
+        }
+
+
+        // Prepare data for payment service
+        const paymentData = {
+            orderId: order._id,
+            amount: order.totalPrice,
+            currency: 'EGP', // Or get from order/config
+            userId: req.user._id,
+            billingData: {
+                email: order.userId.email || 'notprovided@example.com', // Use populated email
+                firstName: order.userId.name?.split(' ')[0] || 'N/A', // Use populated name
+                lastName: order.userId.name?.split(' ').slice(1).join(' ') || 'N/A',
+                phone: order.shipping.phone,
+                street: order.shipping.address,
+                city: order.shipping.city,
+                country: order.shipping.country,
+                postalCode: order.shipping.postalCode || 'NA'
+                // Add other fields if available/needed: apartment, floor, building, state
+            }
+        };
+
+        const paymentServiceUrl = process.env.PAYMENT_SERVICE_URL || 'http://payment-service:3003';
+        
+        console.log(`Initiating payment for order ${order._id} via ${paymentServiceUrl}`);
+        // Call Payment Service to initiate
+        // TODO: Add timeout and potentially retry logic for this internal call
+        const response = await axios.post(`${paymentServiceUrl}/api/payments/initiate/paymob`, paymentData, {
+            headers: {
+                // Pass necessary headers if payment service requires auth (e.g., internal API key)
+                // 'X-Internal-API-Key': process.env.INTERNAL_API_KEY 
+            }
+        });
+
+        // Return the payment initiation details (e.g., iframe URL) to the client
+        res.json(response.data);
+
+    } catch (error) {
+        console.error('Payment initiation failed in order service:', error.response?.data || error.message);
+        res.status(error.response?.status || 500).json({ 
+            message: 'Failed to initiate payment', 
+            error: error.response?.data || 'Internal server error or payment service unavailable' 
+        });
+    }
+};
+
+
+// @desc    Update order payment status (called by Payment Service)
+// @route   PUT /api/orders/:id/payment-status
+// @access  Internal (Payment Service) - Secure this endpoint appropriately
+const updateOrderPaymentStatus = async (req, res) => {
+    try {
+        // TODO: Add security check: Ensure this request comes from a trusted source (Payment Service)
+        // e.g., check an internal API key passed in headers, check source IP, or use internal JWT
+        // const internalApiKey = req.headers['x-internal-api-key'];
+        // if (internalApiKey !== process.env.INTERNAL_API_KEY) {
+        //     return res.status(403).json({ message: 'Forbidden: Invalid internal key' });
+        // }
+
+        const { status, paymentResult } = req.body; // status: 'successful' or 'failed'
+        const orderId = req.params.id;
+
+        console.log(`Received payment status update for order ${orderId}: Status=${status}`);
+
+        const order = await Order.findById(orderId);
+
+        if (!order) {
+            console.error(`Order not found during payment status update: ${orderId}`);
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Avoid processing if order is already paid or in a final state
+         if (order.isPaid && status === 'successful') {
+            console.log(`Order ${orderId} is already marked as paid. Ignoring duplicate success update.`);
+            return res.status(200).json(order); // Acknowledge but don't re-process
+        }
+        if (order.status === 'delivered' || order.status === 'cancelled') {
+             console.log(`Order ${orderId} is already in final state ${order.status}. Ignoring payment update.`);
+             return res.status(200).json(order);
+        }
+
+
+        if (status === 'successful') {
+            order.isPaid = true;
+            order.paidAt = new Date();
+            order.status = 'processing'; // Update status after payment
+            order.paymentResult = { // Store relevant details from payment service
+                id: paymentResult?.id, // Transaction ID
+                status: paymentResult?.status || 'successful',
+                update_time: paymentResult?.update_time || new Date().toISOString(),
+                gatewayOrderId: paymentResult?.gatewayOrderId // PayMob Order ID
+            };
+
+            console.log(`Order ${orderId} marked as paid. Attempting stock update...`);
+
+            // --- Update product stock now that payment is confirmed ---
+            try {
+                const productServiceUrl = process.env.PRODUCT_SERVICE_URL || 'http://product-service:4000';
+                for (const item of order.items) {
+                    // Call product service to decrease stock using the correct endpoint
+                     await axios.patch(`${productServiceUrl}/api/products/${item.productId}/stock/decrease`, {
+                        quantity: item.quantity 
+                    }, {
+                        // Pass internal auth header if product service requires it
+                        // headers: { 'X-Internal-API-Key': process.env.INTERNAL_API_KEY } 
+                    });
+                     console.log(`Stock decreased for product ${item.productId} by ${item.quantity}`);
+                }
+                console.log(`Stock update successful for order ${order._id}`);
+            } catch (stockError) {
+                console.error(`CRITICAL: Failed to update stock for order ${order._id}:`, stockError.response?.data || stockError.message);
+                
+                // --- Compensation / Recovery Strategy ---
+                // Option 1: Mark order for manual review
+                order.status = 'payment_received_stock_error'; 
+                
+                // Option 2: Enqueue a background job to retry stock update
+                // await enqueueStockUpdateJob(order._id, order.items);
+                
+                // Option 3: Attempt immediate retry (use with caution, might block response)
+                // let retries = 3;
+                // while(retries > 0) { /* ... retry logic ... */ retries--; }
+                
+                // Log this critical error - requires monitoring and potentially manual intervention
+                // Consider sending an alert to an admin/monitoring system
+                // alertAdmin(`Stock update failed for paid order ${order._id}`);
+                
+                // Save the order with the error status
+                await order.save(); 
+                
+                // Decide whether to return error or success to payment service callback
+                // Returning success might be better if payment is confirmed, but log the internal issue.
+                // Returning error might cause payment service to retry notification? (Check PayMob docs)
+                // For now, let the order save and return the updated order with error status.
+                return res.status(200).json(order); // Acknowledge payment, but order status reflects the issue
+            }
+            // --- End stock update ---
+
+        } else { // Payment failed
+            console.log(`Payment failed for order ${orderId}.`);
+            order.isPaid = false;
+            order.status = 'payment_failed'; // Update status
+            // Optionally clear paymentResult or store failure reason
+            order.paymentResult = {
+                id: paymentResult?.id,
+                status: 'failed',
+                update_time: paymentResult?.update_time || new Date().toISOString(),
+                message: paymentResult?.status || 'Payment failed or was cancelled'
+            };
+        }
+
+        const updatedOrder = await order.save();
+        console.log(`Order ${orderId} status updated to ${updatedOrder.status}`);
+        res.json(updatedOrder);
+
+    } catch (error) {
+        console.error(`Error updating payment status for order ${req.params.id}:`, error);
+        res.status(500).json({ message: 'Server Error updating order payment status' });
+    }
+};
+
+// @desc    Get all orders (Admin)
 // @route   GET /api/orders
 // @access  Private/Admin
-exports.getOrders = async (req, res) => {
-  try {
-    const orders = await Order.find({}).sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error' });
-  }
+const getOrders = async (req, res) => {
+    try {
+        const orders = await Order.find({}).populate('userId', 'id name email'); // Populate user details
+        res.json(orders);
+    } catch (error) {
+        console.error('Get Orders Error:', error);
+        res.status(500).json({ message: 'Server Error fetching orders' });
+    }
 };
 
-// @desc    Get user orders
+// @desc    Get logged in user orders
 // @route   GET /api/orders/myorders
 // @access  Private
-exports.getMyOrders = async (req, res) => {
-  try {
-    const orders = await Order.find({ userId: req.user._id }).sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error' });
-  }
+const getMyOrders = async (req, res) => {
+    try {
+        const orders = await Order.find({ userId: req.user._id });
+        res.json(orders);
+    } catch (error) {
+        console.error('Get My Orders Error:', error);
+        res.status(500).json({ message: 'Server Error fetching user orders' });
+    }
 };
 
 // @desc    Get order by ID
 // @route   GET /api/orders/:id
 // @access  Private
-exports.getOrderById = async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id);
+const getOrderById = async (req, res) => {
+    try {
+        const order = await Order.findById(req.params.id).populate('userId', 'name email');
 
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
 
-    // Check if user is order owner or admin
-    if (order.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to access this order' });
-    }
+        // Check ownership or admin role
+        if (order.userId._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+             return res.status(403).json({ message: 'Not authorized to view this order' });
+        }
 
-    res.json(order);
-  } catch (error) {
-    console.error(error);
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({ message: 'Order not found' });
+        res.json(order);
+    } catch (error) {
+        console.error('Get Order By ID Error:', error);
+         if (error.kind === 'ObjectId') {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+        res.status(500).json({ message: 'Server Error fetching order' });
     }
-    res.status(500).json({ message: 'Server Error' });
-  }
 };
 
-// @desc    Update order status (admin only)
+// @desc    Update order status (e.g., to shipped, delivered) (Admin)
 // @route   PUT /api/orders/:id/status
 // @access  Private/Admin
-exports.updateOrderStatus = async (req, res) => {
-  try {
-    const { status } = req.body;
-    
-    if (!status) {
-      return res.status(400).json({ message: 'Status is required' });
+const updateOrderStatus = async (req, res) => {
+    try {
+        const { status } = req.body;
+        // Added error status to valid list
+        const validStatuses = ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'payment_failed', 'payment_received_stock_error']; 
+
+        if (!status || !validStatuses.includes(status)) {
+            return res.status(400).json({ message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+        }
+
+        const order = await Order.findById(req.params.id);
+
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Add logic based on status transitions if needed
+        // e.g., cannot move from delivered back to processing unless admin override
+        // e.g., cannot move from cancelled to processing
+
+        order.status = status;
+
+        if (status === 'delivered' && !order.isDelivered) {
+            order.isDelivered = true;
+            order.deliveredAt = new Date();
+        } else if (status !== 'delivered') {
+             // If status changes away from delivered, reset delivery status? (depends on business logic)
+             // order.isDelivered = false;
+             // order.deliveredAt = null;
+        }
+
+        // Handle cancellation - should potentially refund and restock
+        if (status === 'cancelled' && order.isPaid) {
+            // TODO: Implement refund logic via payment service if order was paid
+            console.warn(`Order ${order._id} cancelled but was paid. Implement refund logic.`);
+            // TODO: Implement restocking logic via product service if needed
+            // await restockItems(order.items); 
+        } else if (status === 'cancelled' && !order.isPaid) {
+             console.log(`Order ${order._id} cancelled (was not paid).`);
+        }
+
+
+        const updatedOrder = await order.save();
+        res.json(updatedOrder);
+    } catch (error) {
+        console.error('Update Order Status Error:', error);
+         if (error.kind === 'ObjectId') {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+        res.status(500).json({ message: 'Server Error updating order status' });
     }
-
-    const order = await Order.findById(req.params.id);
-
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    order.status = status;
-    
-    // If status is delivered, update isDelivered and deliveredAt
-    if (status === 'delivered') {
-      order.isDelivered = true;
-      order.deliveredAt = Date.now();
-    }
-
-    await order.save();
-    
-    res.json(order);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error' });
-  }
 };
 
-// @desc    Update order to paid
-// @route   PUT /api/orders/:id/pay
-// @access  Private
-exports.updateOrderToPaid = async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id);
-
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    // Check if user is order owner
-    if (order.userId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized to update this order' });
-    }
-
-    order.isPaid = true;
-    order.paidAt = Date.now();
-    order.status = 'processing';
-    order.paymentResult = {
-      id: req.body.id,
-      status: req.body.status,
-      update_time: req.body.update_time,
-      email_address: req.body.email_address
-    };
-
-    const updatedOrder = await order.save();
-    
-    res.json(updatedOrder);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error' });
-  }
-};
-
-// @desc    Create PayMob payment
-// @route   POST /api/orders/:id/pay/paymob
-// @access  Private
-exports.createPaymobPayment = async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id);
-
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
-
-    // Check if user is order owner
-    if (order.userId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized for this order' });
-    }
-
-    if (order.isPaid) {
-      return res.status(400).json({ message: 'Order is already paid' });
-    }
-
-    // 1. Authentication Request to get auth token
-    const authResponse = await axios.post('https://accept.paymob.com/api/auth/tokens', {
-      api_key: process.env.PAYMOB_API_KEY
-    });
-
-    const { token } = authResponse.data;
-
-    // 2. Order Registration
-    const orderResponse = await axios.post('https://accept.paymob.com/api/ecommerce/orders', {
-      auth_token: token,
-      delivery_needed: false,
-      amount_cents: order.totalPrice * 100, // Convert to cents
-      items: order.items.map(item => ({
-        name: item.name,
-        amount_cents: item.price * 100 * item.quantity,
-        description: `${item.name} x ${item.quantity}`,
-        quantity: item.quantity
-      }))
-    });
-
-    // 3. Payment Key Request
-    const paymentKeyResponse = await axios.post('https://accept.paymob.com/api/acceptance/payment_keys', {
-      auth_token: token,
-      amount_cents: order.totalPrice * 100,
-      expiration: 3600,
-      order_id: orderResponse.data.id,
-      billing_data: {
-        apartment: 'NA',
-        email: req.user.email,
-        floor: 'NA',
-        first_name: req.user.name.split(' ')[0],
-        street: order.shipping.address,
-        building: 'NA',
-        phone_number: order.shipping.phone,
-        shipping_method: 'NA',
-        postal_code: order.shipping.postalCode,
-        city: order.shipping.city,
-        country: order.shipping.country,
-        last_name: req.user.name.split(' ').length > 1 ? req.user.name.split(' ')[1] : 'NA',
-        state: 'NA'
-      },
-      currency: 'EGP',
-      integration_id: process.env.PAYMOB_INTEGRATION_ID
-    });
-
-    // Return payment token and iframe URL
-    res.json({
-      payment_token: paymentKeyResponse.data.token,
-      iframe_url: `https://accept.paymobsolutions.com/api/acceptance/iframes/${process.env.PAYMOB_IFRAME_ID}?payment_token=${paymentKeyResponse.data.token}`
-    });
-  } catch (error) {
-    console.error('PayMob payment error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      message: 'Payment processing failed',
-      error: error.response?.data || error.message
-    });
-  }
-};
-
-// @desc    Handle PayMob callback (webhook)
-// @route   POST /api/orders/paymob-callback
-// @access  Public
-exports.paymobCallback = async (req, res) => {
-  try {
-    const { order_id, success, transaction_id } = req.body;
-    
-    // Validate the transaction with PayMob API if needed
-    
-    if (success) {
-      // Find the order in our system
-      // Note: You'll need to store PayMob order ID in your order or have a mapping
-      const order = await Order.findOne({ 'paymentResult.id': order_id });
-      
-      if (!order) {
-        return res.status(404).json({ message: 'Order not found' });
-      }
-      
-      // Update order status
-      order.isPaid = true;
-      order.paidAt = Date.now();
-      order.status = 'processing';
-      order.paymentResult = {
-        id: order_id,
-        status: 'completed',
-        update_time: new Date().toISOString(),
-        transaction_id
-      };
-      
-      await order.save();
-    }
-    
-    // Return success to PayMob
-    res.status(200).json({ status: 'success' });
-  } catch (error) {
-    console.error('PayMob callback error:', error);
-    res.status(500).json({ message: 'Server Error' });
-  }
+// Export all controller functions used by routes
+module.exports = {
+    createOrder,
+    initiatePayment,
+    updateOrderPaymentStatus,
+    getOrders,
+    getMyOrders,
+    getOrderById,
+    updateOrderStatus
 };
